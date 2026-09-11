@@ -818,21 +818,23 @@
       const useCanvasBox = false;
       const svgInfo = inspectSvg(shared.svgMarkup, useCanvasBox);
       if (!svgInfo.width || !svgInfo.height) return;
+      const shapes = svgToLottieShapeItems(shared.svgMarkup);
+      if (!shapes.length) {
+        setStatus(layer.ind, "SVG path를 Lottie shape로 변환하지 못했습니다.", true);
+        return;
+      }
       const originalBox = measureOriginalLayerBox(original);
       const originalScale = readVector(original.ks && original.ks.s, [100, 100]);
       const signX = originalScale[0] < 0 ? -1 : 1;
       const signY = originalScale[1] < 0 ? -1 : 1;
-      const assetId = `asset_svg_${layer.ind}`;
-      const asset = { id: assetId, w: svgInfo.width, h: svgInfo.height, u: "", p: "data:image/svg+xml;charset=utf-8," + encodeURIComponent(shared.svgMarkup), e: 1 };
-      state.data.assets = Array.isArray(state.data.assets) ? state.data.assets : [];
-      const assetIndex = state.data.assets.findIndex(item => item.id === assetId);
-      if (assetIndex >= 0) state.data.assets[assetIndex] = asset;
-      else state.data.assets.push(asset);
-      layer.ty = 2;
-      layer.refId = assetId;
-      delete layer.shapes;
+      removeLayerAsset(layer.ind);
+      layer.ty = 4;
+      delete layer.refId;
+      delete layer.w;
+      delete layer.h;
       delete layer.ef;
       delete layer.hasMask;
+      layer.shapes = shapes;
       setVector(layer.ks.a, [round(svgInfo.contentCenterX || svgInfo.width / 2), round(svgInfo.contentCenterY || svgInfo.height / 2)]);
       const offsetX = readNumber(shared.offsetX);
       const offsetY = readNumber(shared.offsetY);
@@ -854,20 +856,21 @@
     function applyLayerSpaceSvgReplacement(layer, original, shared) {
       const svgInfo = inspectSvg(shared.svgMarkup, false);
       if (!svgInfo.width || !svgInfo.height) return;
-      const assetId = `asset_svg_${layer.ind}`;
-      const asset = { id: assetId, w: svgInfo.width, h: svgInfo.height, u: "", p: "data:image/svg+xml;charset=utf-8," + encodeURIComponent(shared.svgMarkup), e: 1 };
-      state.data.assets = Array.isArray(state.data.assets) ? state.data.assets : [];
-      const assetIndex = state.data.assets.findIndex(item => item.id === assetId);
-      if (assetIndex >= 0) state.data.assets[assetIndex] = asset;
-      else state.data.assets.push(asset);
-      layer.ty = 2;
-      layer.refId = assetId;
-      layer.w = round(svgInfo.width);
-      layer.h = round(svgInfo.height);
+      const shapes = svgToLottieShapeItems(shared.svgMarkup);
+      if (!shapes.length) {
+        setStatus(layer.ind, "SVG path를 Lottie shape로 변환하지 못했습니다.", true);
+        return;
+      }
+      removeLayerAsset(layer.ind);
+      layer.ty = 4;
+      delete layer.refId;
+      delete layer.w;
+      delete layer.h;
       layer.ks = clone(original.ks);
       delete layer.shapes;
       delete layer.ef;
       delete layer.hasMask;
+      layer.shapes = shapes;
       const basePosition = readVector(original.ks && original.ks.p, [0, 0]);
       const offsetX = readNumber(shared.offsetX);
       const offsetY = readNumber(shared.offsetY);
@@ -1033,6 +1036,13 @@
       setVector(layer.ks.s, [round(info.signX * Math.abs(scaleX)), round(info.signY * Math.abs(scaleY))]);
     }
 
+    function removeLayerAsset(ind) {
+      const assetId = `asset_svg_${ind}`;
+      if (Array.isArray(state.data.assets)) {
+        state.data.assets = state.data.assets.filter(asset => asset.id !== assetId);
+      }
+    }
+
     function layerToSvg(layer) {
       if (layer.ty === 2 && layer.refId) {
         const asset = (state.data.assets || state.original.assets || []).find(item => item.id === layer.refId);
@@ -1188,6 +1198,284 @@
 
     function lineCap(value) { return value === 2 ? "round" : value === 3 ? "square" : "butt"; }
     function lineJoin(value) { return value === 2 ? "round" : value === 3 ? "bevel" : "miter"; }
+
+    function svgToLottieShapeItems(svg) {
+      const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
+      const svgEl = doc.querySelector("svg");
+      if (!svgEl || doc.querySelector("parsererror")) return [];
+      const rootStyle = svgNodeStyle(svgEl, {});
+      const rootMatrix = parseSvgTransform(svgEl.getAttribute("transform"));
+      const groups = [];
+      collectSvgShapes(svgEl, rootStyle, rootMatrix, groups);
+      return svgGroupsToLottieStack(groups);
+    }
+
+    function svgGroupsToLottieStack(groups) {
+      // SVG paints later nodes on top; Lottie shape groups stack in the opposite order here.
+      // Keep the visual layer order from Figma by reversing only at the final insertion point.
+      return [...groups].reverse();
+    }
+
+    function collectSvgShapes(node, inheritedStyle, inheritedMatrix, output) {
+      Array.from(node.children || []).forEach(child => {
+        const tag = child.tagName.toLowerCase();
+        if (tag === "defs" || tag === "style" || tag === "metadata" || tag === "title") return;
+        const style = svgNodeStyle(child, inheritedStyle);
+        const matrix = multiplyMatrix(inheritedMatrix, parseSvgTransform(child.getAttribute("transform")));
+        if (tag === "g" || tag === "svg") {
+          collectSvgShapes(child, style, matrix, output);
+          return;
+        }
+        const pathData = svgElementPathData(child);
+        if (!pathData) return;
+        const shapes = svgPathToLottieShapes(pathData, matrix);
+        shapes.forEach(shape => {
+          const items = [{ ty: "sh", nm: "Path 1", d: 1, ks: { a: 0, k: shape } }];
+          const fill = parseSvgPaint(style.fill, style.opacity * style.fillOpacity);
+          const stroke = parseSvgPaint(style.stroke, style.opacity * style.strokeOpacity);
+          if (fill) items.push({ ty: "fl", nm: "Fill 1", c: { a: 0, k: fill.color }, o: { a: 0, k: fill.opacity }, r: 1 });
+          if (stroke) items.push({
+            ty: "st",
+            nm: "Stroke 1",
+            lc: svgLineCap(style.strokeLinecap),
+            lj: svgLineJoin(style.strokeLinejoin),
+            ml: 4,
+            o: { a: 0, k: stroke.opacity },
+            w: { a: 0, k: Math.max(0.1, round(readNumber(style.strokeWidth) * matrixScale(matrix))) },
+            c: { a: 0, k: stroke.color }
+          });
+          items.push({ ty: "tr", a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, p: { a: 0, k: [0, 0] }, r: { a: 0, k: 0 }, sa: { a: 0, k: 0 }, o: { a: 0, k: 100 } });
+          output.push({ ty: "gr", nm: svgLayerName(child, output.length), it: items });
+        });
+      });
+    }
+
+    function svgLayerName(node, index) {
+      return node.getAttribute("data-name")
+        || node.getAttribute("inkscape:label")
+        || node.getAttribute("id")
+        || node.getAttribute("class")
+        || `SVG Shape ${index + 1}`;
+    }
+
+    function svgNodeStyle(node, inherited) {
+      const inline = parseStyleAttribute(node.getAttribute("style"));
+      const get = (name, fallback) => node.getAttribute(name) ?? inline[name] ?? fallback;
+      const opacity = readOpacity(get("opacity", inherited.opacity ?? 1));
+      return {
+        fill: get("fill", inherited.fill ?? "#000000"),
+        fillOpacity: readOpacity(get("fill-opacity", inherited.fillOpacity ?? 1)),
+        opacity,
+        stroke: get("stroke", inherited.stroke ?? "none"),
+        strokeOpacity: readOpacity(get("stroke-opacity", inherited.strokeOpacity ?? 1)),
+        strokeWidth: get("stroke-width", inherited.strokeWidth ?? 1),
+        strokeLinecap: get("stroke-linecap", inherited.strokeLinecap ?? "butt"),
+        strokeLinejoin: get("stroke-linejoin", inherited.strokeLinejoin ?? "miter")
+      };
+    }
+
+    function parseStyleAttribute(value) {
+      return String(value || "").split(";").reduce((acc, item) => {
+        const index = item.indexOf(":");
+        if (index > 0) acc[item.slice(0, index).trim()] = item.slice(index + 1).trim();
+        return acc;
+      }, {});
+    }
+
+    function svgElementPathData(node) {
+      const tag = node.tagName.toLowerCase();
+      if (tag === "path") return node.getAttribute("d") || "";
+      if (tag === "rect") {
+        const x = readNumber(node.getAttribute("x"));
+        const y = readNumber(node.getAttribute("y"));
+        const w = readNumber(node.getAttribute("width"));
+        const h = readNumber(node.getAttribute("height"));
+        if (!w || !h) return "";
+        return `M${x} ${y} L${x + w} ${y} L${x + w} ${y + h} L${x} ${y + h} Z`;
+      }
+      if (tag === "circle" || tag === "ellipse") {
+        const cx = readNumber(node.getAttribute("cx"));
+        const cy = readNumber(node.getAttribute("cy"));
+        const rx = tag === "circle" ? readNumber(node.getAttribute("r")) : readNumber(node.getAttribute("rx"));
+        const ry = tag === "circle" ? rx : readNumber(node.getAttribute("ry"));
+        if (!rx || !ry) return "";
+        const c = 0.5522847498;
+        return `M${cx + rx} ${cy} C${cx + rx} ${cy + ry * c} ${cx + rx * c} ${cy + ry} ${cx} ${cy + ry} C${cx - rx * c} ${cy + ry} ${cx - rx} ${cy + ry * c} ${cx - rx} ${cy} C${cx - rx} ${cy - ry * c} ${cx - rx * c} ${cy - ry} ${cx} ${cy - ry} C${cx + rx * c} ${cy - ry} ${cx + rx} ${cy - ry * c} ${cx + rx} ${cy} Z`;
+      }
+      if (tag === "polygon" || tag === "polyline") {
+        const points = String(node.getAttribute("points") || "").trim().split(/[\s,]+/).map(Number);
+        if (points.length < 4 || points.some(n => !Number.isFinite(n))) return "";
+        let d = `M${points[0]} ${points[1]}`;
+        for (let index = 2; index < points.length; index += 2) d += ` L${points[index]} ${points[index + 1]}`;
+        return tag === "polygon" ? `${d} Z` : d;
+      }
+      return "";
+    }
+
+    function svgPathToLottieShapes(d, matrix) {
+      const tokens = String(d || "").match(/[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+)(?:e[-+]?\d+)?/g) || [];
+      const shapes = [];
+      let index = 0, command = "", current = [0, 0], start = [0, 0], shape = null;
+      const isCommand = value => /^[a-zA-Z]$/.test(value);
+      const read = () => Number(tokens[index++]);
+      const hasNumber = () => index < tokens.length && !isCommand(tokens[index]);
+      const ensureShape = point => {
+        if (shape) return;
+        const p = applyMatrix(matrix, point);
+        shape = { c: false, i: [[0, 0]], o: [[0, 0]], v: [[round(p[0]), round(p[1])]] };
+      };
+      const addLine = point => {
+        ensureShape(current);
+        const p = applyMatrix(matrix, point);
+        shape.v.push([round(p[0]), round(p[1])]);
+        shape.i.push([0, 0]);
+        shape.o.push([0, 0]);
+        current = point;
+      };
+      const addCurve = (c1, c2, point) => {
+        ensureShape(current);
+        const prevAbs = applyMatrix(matrix, current);
+        const c1Abs = applyMatrix(matrix, c1);
+        const c2Abs = applyMatrix(matrix, c2);
+        const pAbs = applyMatrix(matrix, point);
+        shape.o[shape.o.length - 1] = [round(c1Abs[0] - prevAbs[0]), round(c1Abs[1] - prevAbs[1])];
+        shape.v.push([round(pAbs[0]), round(pAbs[1])]);
+        shape.i.push([round(c2Abs[0] - pAbs[0]), round(c2Abs[1] - pAbs[1])]);
+        shape.o.push([0, 0]);
+        current = point;
+      };
+      const closeShape = () => {
+        if (!shape) return;
+        shape.c = true;
+        shapes.push(shape);
+        shape = null;
+        current = start;
+      };
+      while (index < tokens.length) {
+        if (isCommand(tokens[index])) command = tokens[index++];
+        const relative = command === command.toLowerCase();
+        const cmd = command.toUpperCase();
+        if (cmd === "M") {
+          if (shape) shapes.push(shape);
+          const x = read(), y = read();
+          current = relative ? [current[0] + x, current[1] + y] : [x, y];
+          start = current;
+          const p = applyMatrix(matrix, current);
+          shape = { c: false, i: [[0, 0]], o: [[0, 0]], v: [[round(p[0]), round(p[1])]] };
+          while (hasNumber()) {
+            const lx = read(), ly = read();
+            addLine(relative ? [current[0] + lx, current[1] + ly] : [lx, ly]);
+          }
+        } else if (cmd === "L") {
+          while (hasNumber()) {
+            const x = read(), y = read();
+            addLine(relative ? [current[0] + x, current[1] + y] : [x, y]);
+          }
+        } else if (cmd === "H") {
+          while (hasNumber()) {
+            const x = read();
+            addLine([relative ? current[0] + x : x, current[1]]);
+          }
+        } else if (cmd === "V") {
+          while (hasNumber()) {
+            const y = read();
+            addLine([current[0], relative ? current[1] + y : y]);
+          }
+        } else if (cmd === "C") {
+          while (hasNumber()) {
+            const values = [read(), read(), read(), read(), read(), read()];
+            const c1 = relative ? [current[0] + values[0], current[1] + values[1]] : [values[0], values[1]];
+            const c2 = relative ? [current[0] + values[2], current[1] + values[3]] : [values[2], values[3]];
+            const p = relative ? [current[0] + values[4], current[1] + values[5]] : [values[4], values[5]];
+            addCurve(c1, c2, p);
+          }
+        } else if (cmd === "Q") {
+          while (hasNumber()) {
+            const values = [read(), read(), read(), read()];
+            const q = relative ? [current[0] + values[0], current[1] + values[1]] : [values[0], values[1]];
+            const p = relative ? [current[0] + values[2], current[1] + values[3]] : [values[2], values[3]];
+            const c1 = [current[0] + (q[0] - current[0]) * 2 / 3, current[1] + (q[1] - current[1]) * 2 / 3];
+            const c2 = [p[0] + (q[0] - p[0]) * 2 / 3, p[1] + (q[1] - p[1]) * 2 / 3];
+            addCurve(c1, c2, p);
+          }
+        } else if (cmd === "Z") {
+          closeShape();
+        } else {
+          break;
+        }
+      }
+      if (shape) shapes.push(shape);
+      return shapes.filter(item => item.v.length > 1);
+    }
+
+    function parseSvgTransform(value) {
+      let matrix = identityMatrix();
+      const parts = String(value || "").match(/[a-zA-Z]+\([^)]*\)/g) || [];
+      parts.forEach(part => {
+        const name = part.slice(0, part.indexOf("(")).trim();
+        const values = part.slice(part.indexOf("(") + 1, -1).split(/[\s,]+/).filter(Boolean).map(Number);
+        let next = identityMatrix();
+        if (name === "matrix" && values.length >= 6) next = values.slice(0, 6);
+        else if (name === "translate") next = [1, 0, 0, 1, values[0] || 0, values[1] || 0];
+        else if (name === "scale") next = [values[0] || 1, 0, 0, values.length > 1 ? values[1] : values[0] || 1, 0, 0];
+        else if (name === "rotate") {
+          const angle = (values[0] || 0) * Math.PI / 180;
+          const cos = Math.cos(angle), sin = Math.sin(angle);
+          const rot = [cos, sin, -sin, cos, 0, 0];
+          if (values.length >= 3) next = multiplyMatrix(multiplyMatrix([1, 0, 0, 1, values[1], values[2]], rot), [1, 0, 0, 1, -values[1], -values[2]]);
+          else next = rot;
+        }
+        matrix = multiplyMatrix(matrix, next);
+      });
+      return matrix;
+    }
+
+    function identityMatrix() { return [1, 0, 0, 1, 0, 0]; }
+    function multiplyMatrix(a, b) {
+      return [
+        a[0] * b[0] + a[2] * b[1],
+        a[1] * b[0] + a[3] * b[1],
+        a[0] * b[2] + a[2] * b[3],
+        a[1] * b[2] + a[3] * b[3],
+        a[0] * b[4] + a[2] * b[5] + a[4],
+        a[1] * b[4] + a[3] * b[5] + a[5]
+      ];
+    }
+    function applyMatrix(m, point) {
+      return [m[0] * point[0] + m[2] * point[1] + m[4], m[1] * point[0] + m[3] * point[1] + m[5]];
+    }
+    function matrixScale(m) {
+      return (Math.hypot(m[0], m[1]) + Math.hypot(m[2], m[3])) / 2 || 1;
+    }
+    function parseSvgPaint(value, opacity) {
+      const color = parseSvgColor(value);
+      if (!color) return null;
+      return { color, opacity: round(Math.max(0, Math.min(1, opacity)) * 100) };
+    }
+    function parseSvgColor(value) {
+      const text = String(value || "").trim();
+      if (!text || text === "none" || text.startsWith("url(")) return null;
+      if (text[0] === "#") {
+        const hex = text.slice(1);
+        const full = hex.length === 3 ? hex.split("").map(ch => ch + ch).join("") : hex.slice(0, 6);
+        const number = Number.parseInt(full, 16);
+        if (!Number.isFinite(number)) return [0, 0, 0];
+        return [((number >> 16) & 255) / 255, ((number >> 8) & 255) / 255, (number & 255) / 255];
+      }
+      const rgb = text.match(/rgba?\(([^)]+)\)/i);
+      if (rgb) {
+        const parts = rgb[1].split(/[\s,]+/).map(part => Number.parseFloat(part));
+        return parts.slice(0, 3).map(part => Math.max(0, Math.min(255, part)) / 255);
+      }
+      const named = { black: [0, 0, 0], white: [1, 1, 1], transparent: null };
+      return named[text.toLowerCase()] || [0, 0, 0];
+    }
+    function readOpacity(value) {
+      const n = Number(value);
+      return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 1;
+    }
+    function svgLineCap(value) { return value === "round" ? 2 : value === "square" ? 3 : 1; }
+    function svgLineJoin(value) { return value === "round" ? 2 : value === "bevel" ? 3 : 1; }
 
     function setPositionInputsEnabled(ind, enabled) {
       const row = document.querySelector(`[data-position-row-for="${ind}"]`);
@@ -1406,7 +1694,8 @@
     }
     function togglePlayback() { if (!state.animation) return; state.playing = !state.playing; state.playing ? state.animation.play() : state.animation.pause(); $("playPauseBtn").textContent = state.playing ? "일시정지" : "재생"; }
     function downloadJson() {
-      const blob = new Blob([JSON.stringify(state.data, null, 2)], { type: "application/json" });
+      const downloadData = prepareVectorDownloadData(state.data);
+      const blob = new Blob([JSON.stringify(downloadData, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url; link.download = currentTemplate().fileName; document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
@@ -1419,8 +1708,9 @@
       $("selectedInfo").textContent = "JSON 파일을 줄이는 중입니다...";
       await nextFrame();
       try {
-        const optimized = optimizeLottieJson(state.data);
-        const pretty = JSON.stringify(state.data, null, 2);
+        const downloadData = prepareVectorDownloadData(state.data);
+        const optimized = optimizeLottieJson(downloadData);
+        const pretty = JSON.stringify(downloadData, null, 2);
         const minified = JSON.stringify(optimized);
         const before = byteSize(pretty);
         const after = byteSize(minified);
@@ -1433,6 +1723,29 @@
         button.disabled = false;
         renderMinifyButton();
       }
+    }
+    function prepareVectorDownloadData(data) {
+      const output = clone(data);
+      if (!Array.isArray(output.layers) || !Array.isArray(output.assets)) return output;
+      const assets = new Map(output.assets.map(asset => [asset.id, asset]));
+      output.layers.forEach(layer => {
+        if (layer.ty !== 2 || !layer.refId) return;
+        const asset = assets.get(layer.refId);
+        const svg = assetToSvg(asset);
+        if (!svg) return;
+        const shapes = svgToLottieShapeItems(svg);
+        if (!shapes.length) return;
+        layer.ty = 4;
+        layer.shapes = shapes;
+        delete layer.refId;
+        delete layer.w;
+        delete layer.h;
+        delete layer.ef;
+        delete layer.hasMask;
+      });
+      const used = new Set(output.layers.map(layer => layer.refId).filter(Boolean));
+      output.assets = output.assets.filter(asset => !asset.id || used.has(asset.id));
+      return output;
     }
     function optimizeLottieJson(data) {
       const optimized = clone(data);
