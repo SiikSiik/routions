@@ -24,8 +24,8 @@
     }
     * { box-sizing: border-box; }
     body { margin: 0; height: 100vh; overflow: hidden; color: var(--ink); background: #EEEEEE; }
-    .home-screen { position: fixed; inset: 0; z-index: 100; display: block; width: 100vw; height: 100vh; overflow: hidden; border: 0; padding: 0; background: #EEEEEE; color: var(--ink); }
-    .home-screen.is-hidden { opacity: 0; pointer-events: none; transition: opacity .24s ease; }
+    .home-screen { position: fixed; inset: 0; z-index: 100; display: block; width: 100vw; height: 100vh; overflow: hidden; border: 0; padding: 0; background: #EEEEEE; color: var(--ink); transition: opacity .24s ease, visibility .24s ease; }
+    .home-screen.is-hidden { opacity: 0; visibility: hidden; pointer-events: none; }
     .home-title-wrap { position: absolute; z-index: 2; left: 50%; top: 50%; transform: translate(-50%, -50%); display: grid; justify-items: start; gap: 12px; width: max-content; max-width: 88vw; }
     .home-title { margin: 0; width: 100%; text-align: left; font-size: clamp(18px, 3vw, 40px); line-height: .96; font-weight: 600; letter-spacing: 0; color: var(--ink); cursor: pointer; transition: color .18s ease; }
     .home-title:hover, .home-title:focus-visible { color: var(--accent); }
@@ -301,8 +301,14 @@
     const state = { data: null, original: null, originalByInd: new Map(), svgByLayer: new Map(), sharedByName: new Map(), groupOffsets: new Map(), resizeTimers: new Map(), animation: null, hoverPreview: null, homeAnimations: [], homeTitleAnimation: null, homeBubbleFrame: null, homeBubbleTarget: null, homeBubbleTimer: null, dirty: false, playing: true, currentTemplateKey: "basic1" };
     const $ = id => document.getElementById(id);
 
-    document.querySelectorAll("[data-template-key]").forEach(tab => {
-      tab.addEventListener("click", () => loadSelectedTemplate(tab.dataset.templateKey));
+    $("templateTabs").addEventListener("click", event => {
+      const tab = event.target.closest(".template-tab[data-template-key]");
+      if (!tab || !$("templateTabs").contains(tab)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      enterEditor(tab.dataset.templateKey);
+    });
+    document.querySelectorAll(".template-tab[data-template-key]").forEach(tab => {
       tab.addEventListener("mouseenter", event => showTemplatePreview(tab, event));
       tab.addEventListener("mousemove", event => positionTemplatePreview(event));
       tab.addEventListener("mouseleave", hideTemplatePreview);
@@ -336,27 +342,38 @@
     function currentTemplate() {
       return templates[state.currentTemplateKey] || templates.basic1;
     }
+    function resolveTemplateKey(templateKey) {
+      if (typeof templateKey === "string" && templates[templateKey]) return templateKey;
+      if (templates[state.currentTemplateKey]) return state.currentTemplateKey;
+      return "basic1";
+    }
     function loadSelectedTemplate(templateKey = state.currentTemplateKey) {
-      state.currentTemplateKey = typeof templateKey === "string" ? templateKey : state.currentTemplateKey || "basic1";
+      state.currentTemplateKey = resolveTemplateKey(templateKey);
       const template = currentTemplate();
-      const data = template.uploadedData ? clone(template.uploadedData) : JSON.parse($(template.scriptId).textContent);
-      state.data = clone(data);
-      state.original = clone(data);
-      state.originalByInd = new Map(state.original.layers.map(layer => [layer.ind, layer]));
-      state.svgByLayer = new Map();
-      state.resizeTimers = new Map();
-      state.dirty = false;
-      state.playing = true;
-      applySharedReplacements();
-      state.dirty = state.sharedByName.size > 0;
-      buildAssetList();
-      renderPreview();
-      updateDirty();
       updateTemplateTabs();
       renderResetButton();
       const home = $("homeScreen");
-      if (home && home.classList.contains("is-hidden") && location.hash.startsWith("#editor")) {
-        history.replaceState({ view: "editor", templateKey: state.currentTemplateKey }, "", editorHash(state.currentTemplateKey));
+      try {
+        const data = template.uploadedData ? clone(template.uploadedData) : JSON.parse($(template.scriptId).textContent);
+        state.data = clone(data);
+        state.original = clone(data);
+        state.originalByInd = new Map(state.original.layers.map(layer => [layer.ind, layer]));
+        state.svgByLayer = new Map();
+        state.resizeTimers = new Map();
+        state.dirty = false;
+        state.playing = true;
+        applySharedReplacements();
+        state.dirty = state.sharedByName.size > 0;
+        buildAssetList();
+        renderPreview();
+        updateDirty();
+      } catch (error) {
+        console.error(error);
+        $("selectedInfo").textContent = `${template.label} 애니메이션을 불러오지 못했습니다.`;
+      } finally {
+        if (home && home.classList.contains("is-hidden") && location.hash.startsWith("#editor")) {
+          history.replaceState({ view: "editor", templateKey: state.currentTemplateKey }, "", editorHash(state.currentTemplateKey));
+        }
       }
     }
     function resetCurrentTemplate() {
@@ -397,7 +414,7 @@
       }
     }
     function updateTemplateTabs() {
-      document.querySelectorAll("[data-template-key]").forEach(tab => {
+      document.querySelectorAll(".template-tab[data-template-key]").forEach(tab => {
         const active = tab.dataset.templateKey === state.currentTemplateKey;
         tab.setAttribute("aria-selected", String(active));
       });
@@ -542,7 +559,7 @@
       const match = location.hash.match(/^#editor\/?([^/]*)$/);
       if (!match) return null;
       const value = decodeURIComponent(match[1] || "");
-      return templates[value] ? value : state.currentTemplateKey;
+      return resolveTemplateKey(value);
     }
     function setHomePlayback(playing) {
       const animations = [state.homeTitleAnimation, ...state.homeAnimations].filter(Boolean);
@@ -566,7 +583,8 @@
     function enterEditor(templateKey, updateHistory = true) {
       const home = $("homeScreen");
       if (!home) return;
-      if (templateKey && templates[templateKey]) loadSelectedTemplate(templateKey);
+      const nextTemplateKey = resolveTemplateKey(templateKey);
+      loadSelectedTemplate(nextTemplateKey);
       home.classList.add("is-hidden");
       hideHomeBubble();
       setHomePlayback(false);
@@ -600,16 +618,18 @@
         rendererSettings: { preserveAspectRatio: "xMidYMid meet" },
         animationData: data
       });
-      positionTemplatePreview(event || tab);
+      positionTemplatePreview(event || tab, tab);
       preview.el.classList.add("is-visible");
     }
-    function positionTemplatePreview(target) {
+    function positionTemplatePreview(target, fallbackTarget) {
       if (!state.hoverPreview) return;
       const popoverWidth = 80;
       const popoverHeight = 80;
       const gap = 2;
-      const isPointer = Number.isFinite(target.clientX) && Number.isFinite(target.clientY);
-      const rect = isPointer ? null : target.getBoundingClientRect();
+      const isPointer = target && Number.isFinite(target.clientX) && Number.isFinite(target.clientY);
+      const elementTarget = isPointer ? null : (target && typeof target.getBoundingClientRect === "function" ? target : fallbackTarget);
+      if (!isPointer && (!elementTarget || typeof elementTarget.getBoundingClientRect !== "function")) return;
+      const rect = isPointer ? null : elementTarget.getBoundingClientRect();
       const baseX = isPointer ? target.clientX : rect.left + rect.width / 2;
       const baseY = isPointer ? target.clientY : rect.bottom;
       let left = baseX - popoverWidth / 2 - 20;
