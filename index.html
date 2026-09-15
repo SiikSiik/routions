@@ -275,8 +275,8 @@
     const slotBlueprints = [
       { id: "body", label: "몸통", names: ["avocado_body_outside", "avocado_body_inside", "avocado_seed"] },
       { id: "face", label: "얼굴", names: ["face_mouth", "face_L_eye", "face_R_eye"] },
-      { id: "right-hand", label: "오른손", names: ["R_arm", "R_hand"] },
-      { id: "left-hand", label: "왼손", names: ["L_arm", "L_hand"] },
+      { id: "right-hand", label: "오른손", names: ["R_arm", "R_hand", "dumbbell"] },
+      { id: "left-hand", label: "왼손", names: ["L_arm", "L_hand", "dumbbell 2"] },
       { id: "right-foot", label: "오른발", names: ["R_leg", "R_ankle", "R_foot"] },
       { id: "left-foot", label: "왼발", names: ["L_leg", "L_ankle", "L_foot"] },
       { id: "dish-set", label: "그릇/음식 세트", names: ["Dish_Set", "Dish_Back", "Dish_Front", "dish_set_bowl", "dish_set_tomato", "dish_set_chicken"], patterns: [/^Dish_/i, /^dish_set_/i, /^Bowl(_|$)/i, /^Plate(_|$)/i, /^Food_/i, /^Topping_/i, /^Ingredient_/i] },
@@ -756,6 +756,23 @@
       return slot ? state.groupOffsets.get(slot.id) || { x: 0, y: 0 } : { x: 0, y: 0 };
     }
 
+    function getMovableSlotLayers(slot) {
+      const slotLayerIds = new Set(slot.layers.map(layer => layer.ind));
+      return slot.layers.filter(layer => !slotLayerIds.has(layer.parent));
+    }
+
+    function getLinkedRootLayers(layer) {
+      const slot = getSlotForLayer(layer);
+      if (!slot) return [];
+      const movableLayers = getMovableSlotLayers(slot);
+      if (["right-hand", "left-hand"].includes(slot.id) && movableLayers.length > 1) return movableLayers;
+      const slotLayersById = new Map(slot.layers.map(item => [item.ind, item]));
+      let parent = slotLayersById.get(layer.parent);
+      if (!parent) return [];
+      while (slotLayersById.has(parent.parent)) parent = slotLayersById.get(parent.parent);
+      return [parent];
+    }
+
     function findSlotLayers(slot) {
       const found = [];
       (slot.names || []).forEach(name => {
@@ -923,11 +940,17 @@
       const layer = getLayer(ind);
       const original = state.originalByInd.get(ind);
       if (!layer || !original) return;
+      const sharedName = normalizedLayerName(original);
+      const shared = state.sharedByName.get(sharedName);
+      const linkedRoots = getLinkedRootLayers(original);
+      if (linkedRoots.length && shared && (shared.offsetX || shared.offsetY)) {
+        linkedRoots.forEach(linkedRoot => translateLayerPosition(linkedRoot, -roundInt(shared.offsetX || 0), -roundInt(shared.offsetY || 0)));
+      }
       Object.keys(layer).forEach(key => delete layer[key]);
       Object.assign(layer, clone(original));
       const groupOffset = getLayerGroupOffset(original);
       if (groupOffset.x || groupOffset.y) translateLayerPosition(layer, groupOffset.x, groupOffset.y);
-      state.sharedByName.delete(normalizedLayerName(original));
+      state.sharedByName.delete(sharedName);
       state.svgByLayer.delete(ind);
       const xInput = document.querySelector(`[data-x-for="${ind}"]`);
       const yInput = document.querySelector(`[data-y-for="${ind}"]`);
@@ -956,13 +979,20 @@
       if (!layer || !info || !xInput || !yInput) return;
       const offsetX = roundInt(readNumber(xInput.value));
       const offsetY = roundInt(readNumber(yInput.value));
-      if (info.preserveLayerTransform) {
+      const sharedName = info.sharedName || normalizedLayerName(state.originalByInd.get(ind) || layer);
+      const shared = state.sharedByName.get(sharedName);
+      const linkedRoots = getLinkedRootLayers(layer);
+      if (linkedRoots.length) {
+        const previousOffsetX = shared ? roundInt(shared.offsetX || 0) : 0;
+        const previousOffsetY = shared ? roundInt(shared.offsetY || 0) : 0;
+        const dx = offsetX - previousOffsetX;
+        const dy = offsetY - previousOffsetY;
+        if (dx || dy) linkedRoots.forEach(linkedRoot => translateLayerPosition(linkedRoot, dx, dy));
+      } else if (info.preserveLayerTransform) {
         setVector(layer.ks.p, [round(info.basePositionX + offsetX), round(info.basePositionY + offsetY)]);
       } else {
         setVector(layer.ks.p, [round(info.baseCenterX + offsetX), round(info.baseCenterY + offsetY)]);
       }
-      const sharedName = info.sharedName || normalizedLayerName(state.originalByInd.get(ind) || layer);
-      const shared = state.sharedByName.get(sharedName);
       if (shared) {
         shared.offsetX = offsetX;
         shared.offsetY = offsetY;
@@ -992,7 +1022,7 @@
       state.groupOffsets.set(slotId, next);
       if (!dx && !dy) return;
       let moved = 0;
-      slot.layers.forEach(layer => {
+      getMovableSlotLayers(slot).forEach(layer => {
         const layerXInput = document.querySelector(`[data-x-for="${layer.ind}"]`);
         const layerYInput = document.querySelector(`[data-y-for="${layer.ind}"]`);
         if (state.svgByLayer.has(layer.ind)) {
